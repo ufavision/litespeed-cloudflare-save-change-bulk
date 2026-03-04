@@ -58,6 +58,15 @@ if ! command -v wp &>/dev/null; then
     exit 1
 fi
 
+# ─── ล้าง log ทุกครั้งก่อนรัน (เก็บเฉพาะ run ล่าสุด) ────────
+> "$LOG_FILE"
+> "$LOG_PASS"
+> "$LOG_FAIL"
+> "$LOG_SKIP"
+> "$LOG_MISMATCH"
+> "$LOG_NOTCF"
+> "$LOG_HASZONE"
+
 START_TIME=$(date +%s)
 log "======================================"
 log " BULK CF SAVE CHANGES (LiteSpeed CDN)"
