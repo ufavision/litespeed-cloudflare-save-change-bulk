@@ -18,7 +18,7 @@
 
 # ─── ตั้งค่า ─────────────────────────────────────────────────
 DELAY_SECONDS=1      # หน่วง (วินาที) หลัง save (ป้องกัน CF rate limit)
-WP_TIMEOUT=60        # timeout ต่อเว็บ (รอ Cloudflare API)
+WP_TIMEOUT=120       # timeout ต่อเว็บ (รองรับ retry 3x + delay 5s)
 RAM_PER_JOB_MB=150   # RAM ประมาณต่อ parallel job
 MAX_JOBS_HARD=20     # จำนวน parallel jobs สูงสุด
 # ─────────────────────────────────────────────────────────────
@@ -151,16 +151,26 @@ process_site() {
             return;
         }
 
-        // ── 3. Save Changes ───────────────────────────────────
-        // เรียก try_refresh_zone() โดยตรง
-        // = Cloudflare API fetch zone (ยืนยันจากการทดสอบจริงแล้ว)
-        LiteSpeed\CDN\Cloudflare::cls()->try_refresh_zone();
+        // ── 3. Save Changes + Retry จนกว่าจะได้ zone ────────────
+        // retry สูงสุด 3 ครั้ง, รอ 5 วินาทีระหว่าง retry
+        // (เหมือนกด Save Changes ซ้ำจนกว่า CF จะตอบกลับ)
+        $max_retry   = 3;
+        $retry_delay = 5;
+        $zone        = "";
+        $attempt     = 0;
+
+        while ($attempt < $max_retry) {
+            $attempt++;
+            LiteSpeed\CDN\Cloudflare::cls()->try_refresh_zone();
+            $zone = trim((string) get_option("litespeed.conf.cdn-cloudflare_zone", ""));
+            if ($zone) break;
+            if ($attempt < $max_retry) sleep($retry_delay);
+        }
 
         // ── 4. Verify zone หลัง save ──────────────────────────
-        $zone  = trim((string) get_option("litespeed.conf.cdn-cloudflare_zone", ""));
         $name2 = trim((string) get_option("litespeed.conf.cdn-cloudflare_name", $name));
-        printf("STATUS:DONE\tZONE:%s\tDOMAIN:%s\tEMAIL:%s\tKEY:%s",
-            $zone, $name2, $email, substr($key, 0, 8)
+        printf("STATUS:DONE\tZONE:%s\tDOMAIN:%s\tEMAIL:%s\tKEY:%s\tATTEMPT:%d",
+            $zone, $name2, $email, substr($key, 0, 8), $attempt
         );
     ' --allow-root 2>/dev/null)
 
@@ -194,13 +204,15 @@ process_site() {
             EMAIL=$(  echo "$EVAL_OUT" | grep -oP '(?<=EMAIL:)[^\t]*')
             KPFX=$(   echo "$EVAL_OUT" | grep -oP '(?<=KEY:)[^\t]*')
 
+            local ATTEMPT
+            ATTEMPT=$(echo "$EVAL_OUT" | grep -oP '(?<=ATTEMPT:)\d+')
             if [[ -n "$ZONE" ]]; then
-                _log  "✅ PASS: $SITE | domain=$DOMAIN | zone=$ZONE"
-                _log_r pass "$SITE | domain=$DOMAIN | zone=$ZONE | email=$EMAIL | key=${KPFX}..."
+                _log  "✅ PASS: $SITE | domain=$DOMAIN | zone=$ZONE | attempt=${ATTEMPT}/3"
+                _log_r pass "$SITE | domain=$DOMAIN | zone=$ZONE | email=$EMAIL | key=${KPFX}... | attempt=${ATTEMPT}/3"
                 touch "${RESULT_DIR}/pass_${UNIQ}"
             else
-                _log  "❌ FAIL (zone ว่าง — credentials ผิด / CF ไม่ตอบ): $SITE | domain=$DOMAIN"
-                _log_r fail "$SITE | zone=(empty) | domain=$DOMAIN | email=$EMAIL | key=${KPFX}..."
+                _log  "❌ FAIL (zone ว่าง หลัง retry ${ATTEMPT}/3 ครั้ง — credentials ผิด / CF ไม่ตอบ): $SITE | domain=$DOMAIN"
+                _log_r fail "$SITE | zone=(empty) | domain=$DOMAIN | email=$EMAIL | key=${KPFX}... | attempt=${ATTEMPT}/3"
                 touch "${RESULT_DIR}/fail_${UNIQ}"
             fi
             sleep "$DELAY_SECONDS"
