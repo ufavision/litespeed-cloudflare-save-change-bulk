@@ -20,6 +20,9 @@ LOG_FILE="/var/log/lscwp-cf-save.log"
 LOG_PASS="/var/log/lscwp-cf-save-pass.log"
 LOG_FAIL="/var/log/lscwp-cf-save-fail.log"
 LOG_SKIP="/var/log/lscwp-cf-save-skip.log"
+LOG_MISMATCH="/var/log/lscwp-cf-save-mismatch.log"  # domain ใน plugin ไม่ตรงกับ folder
+LOG_NOTCF="/var/log/lscwp-cf-save-notcf.log"          # domain ไม่อยู่ใน CF account
+LOG_HASZONE="/var/log/lscwp-cf-save-haszone.log"      # มี zone อยู่แล้ว ข้ามไป
 LOCK_FILE="${LOG_FILE}.lock"
 RESULT_DIR="/tmp/lscwp-cf-$$"
 mkdir -p "$RESULT_DIR"
@@ -35,14 +38,17 @@ log_result() {
     case "$1" in
         pass) ( flock 201; echo "[$ts] $2" >> "$LOG_PASS" ) 201>"${LOG_FILE}.pass.lock" ;;
         fail) ( flock 202; echo "[$ts] $2" >> "$LOG_FAIL" ) 202>"${LOG_FILE}.fail.lock" ;;
-        skip) ( flock 203; echo "[$ts] $2" >> "$LOG_SKIP" ) 203>"${LOG_FILE}.skip.lock" ;;
+        skip)     ( flock 203; echo "[$ts] $2" >> "$LOG_SKIP"     ) 203>"${LOG_FILE}.skip.lock" ;;
+        mismatch) ( flock 204; echo "[$ts] $2" >> "$LOG_MISMATCH" ) 204>"${LOG_FILE}.mismatch.lock" ;;
+        notcf)    ( flock 205; echo "[$ts] $2" >> "$LOG_NOTCF"    ) 205>"${LOG_FILE}.notcf.lock" ;;
+        haszone)  ( flock 206; echo "[$ts] $2" >> "$LOG_HASZONE" ) 206>"${LOG_FILE}.haszone.lock" ;;
     esac
 }
 
 cleanup() {
     wait
     rm -rf "$RESULT_DIR"
-    rm -f "$LOCK_FILE" "${LOG_FILE}.pass.lock" "${LOG_FILE}.fail.lock" "${LOG_FILE}.skip.lock"
+    rm -f "$LOCK_FILE" "${LOG_FILE}.pass.lock" "${LOG_FILE}.fail.lock" "${LOG_FILE}.skip.lock" "${LOG_FILE}.mismatch.lock" "${LOG_FILE}.notcf.lock" "${LOG_FILE}.haszone.lock"
 }
 trap cleanup EXIT
 
@@ -136,7 +142,28 @@ process_site() {
             printf("STATUS:NO_CRED\tKEY_LEN:%d\tNAME:%s", strlen($key), $name); return;
         }
 
-        // ── 3. ยิง CF API โดยตรง + retry ─────────────────────
+        // ── 3. ตรวจ domain ใน plugin ตรงกับ folder ไหม ────────
+        // เช่น folder=101tiger.org แต่ name=ambauto900.com → ผิด
+        $folder = basename(rtrim(ABSPATH, "/"));
+        // กรณี public_html → ใช้ชื่อ domain จาก folder parent
+        if ($folder === "public_html") {
+            $folder = basename(dirname(rtrim(ABSPATH, "/")));
+        }
+        $name_clean = preg_replace("#^https?://#", "", rtrim($name, "/"));
+        if ($folder && $name_clean && $folder !== $name_clean) {
+            printf("STATUS:MISMATCH\tFOLDER:%s\tDOMAIN:%s\tEMAIL:%s\tKEY:%s",
+                $folder, $name_clean, $email, substr($key,0,8));
+            return;
+        }
+
+        // ── 4. มี zone อยู่แล้ว → skip ไม่ต้องยิง CF API ──────
+        $existing_zone = trim((string) get_option("litespeed.conf.cdn-cloudflare_zone", ""));
+        if ($existing_zone) {
+            printf("STATUS:HAS_ZONE\tZONE:%s\tDOMAIN:%s", $existing_zone, $name);
+            return;
+        }
+
+        // ── 4. ยิง CF API โดยตรง + retry ─────────────────────
         $max_retry   = '"$MR"';
         $retry_delay = '"$RD"';
         $zone_id     = "";
@@ -198,6 +225,24 @@ process_site() {
     STATUS=$(echo "$EVAL_OUT" | grep -oP '(?<=STATUS:)\w+')
 
     case "$STATUS" in
+        MISMATCH)
+            local MF MD ME MK
+            MF=$(echo "$EVAL_OUT" | grep -oP '(?<=FOLDER:)[^\t]*')
+            MD=$(echo "$EVAL_OUT" | grep -oP '(?<=DOMAIN:)[^\t]*')
+            ME=$(echo "$EVAL_OUT" | grep -oP '(?<=EMAIL:)[^\t]*')
+            MK=$(echo "$EVAL_OUT" | grep -oP '(?<=KEY:)[^\t]*')
+            _log  "⚠️  MISMATCH: $LABEL | folder=$MF แต่ domain=$MD"
+            _log_r mismatch "$SITE | folder=$MF | domain=$MD | email=$ME | key=${MK}..."
+            touch "${RESULT_DIR}/mismatch_${UNIQ}"
+            ;;
+        HAS_ZONE)
+            local HZ HD
+            HZ=$(echo "$EVAL_OUT" | grep -oP '(?<=ZONE:)[^\t]*')
+            HD=$(echo "$EVAL_OUT" | grep -oP '(?<=DOMAIN:)[^\t]*')
+            _log  "✔️  HAS_ZONE: $LABEL | domain=$HD | zone=$HZ"
+            _log_r haszone "$SITE | domain=$HD | zone=$HZ"
+            touch "${RESULT_DIR}/haszone_${UNIQ}"
+            ;;
         NOPLUGIN)
             _log  "⏭  SKIP (plugin ไม่ active): $LABEL"
             _log_r skip "$SITE | plugin ไม่ active"
@@ -229,6 +274,10 @@ process_site() {
                 _log  "✅ PASS: $LABEL | domain=$DOMAIN | zone=$ZONE | attempt=${ATTEMPT}/${MAX_RETRY}"
                 _log_r pass "$SITE | domain=$DOMAIN | zone=$ZONE | email=$EMAIL | key=${KPFX}... | attempt=${ATTEMPT}/${MAX_RETRY}"
                 touch "${RESULT_DIR}/pass_${UNIQ}"
+            elif [[ "$CFERROR" == "zone_empty" ]]; then
+                _log  "🌐 NOTCF: $LABEL | domain=$DOMAIN | domain ไม่อยู่ใน CF account"
+                _log_r notcf "$SITE | domain=$DOMAIN | email=$EMAIL | key=${KPFX}... | domain ไม่อยู่ใน CF account"
+                touch "${RESULT_DIR}/notcf_${UNIQ}"
             else
                 _log  "❌ FAIL: $LABEL | domain=$DOMAIN | attempt=${ATTEMPT}/${MAX_RETRY} | error=$CFERROR"
                 _log_r fail "$SITE | zone=(empty) | domain=$DOMAIN | email=$EMAIL | key=${KPFX}... | attempt=${ATTEMPT}/${MAX_RETRY} | error=$CFERROR"
@@ -263,28 +312,33 @@ for pid in "${PIDS[@]}"; do wait "$pid"; done
 # ─── สรุป ────────────────────────────────────────────────────
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))
-SUCCESS=$(find "$RESULT_DIR" -name "pass_*" 2>/dev/null | wc -l)
-FAILED=$( find "$RESULT_DIR" -name "fail_*" 2>/dev/null | wc -l)
-SKIPPED=$(find "$RESULT_DIR" -name "skip_*" 2>/dev/null | wc -l)
+SUCCESS=$(   find "$RESULT_DIR" -name "pass_*"     2>/dev/null | wc -l)
+FAILED=$(    find "$RESULT_DIR" -name "fail_*"     2>/dev/null | wc -l)
+SKIPPED=$(   find "$RESULT_DIR" -name "skip_*"     2>/dev/null | wc -l)
+MISMATCHED=$(find "$RESULT_DIR" -name "mismatch_*" 2>/dev/null | wc -l)
+NOTCF=$(     find "$RESULT_DIR" -name "notcf_*"    2>/dev/null | wc -l)
+HASZONE=$(   find "$RESULT_DIR" -name "haszone_*"  2>/dev/null | wc -l)
 
 log "======================================"
 log " สรุปผลรวม"
-log " รวมทั้งหมด   : $TOTAL เว็บ"
-log " ✅ Pass       : $SUCCESS เว็บ"
-log " ❌ Fail       : $FAILED เว็บ"
-log " ⏭  Skip       : $SKIPPED เว็บ"
-log " เวลาที่ใช้    : $(( ELAPSED / 60 )) นาที $(( ELAPSED % 60 )) วินาที"
+log " รวมทั้งหมด      : $TOTAL เว็บ"
+log " ✅ Pass          : $SUCCESS เว็บ"
+log " ✔️  Has Zone       : $HASZONE เว็บ  (มี zone อยู่แล้ว ข้ามไป)"
+log " ❌ Fail          : $FAILED เว็บ  (CF API error/timeout)"
+log " 🌐 Not in CF     : $NOTCF เว็บ  (domain ไม่อยู่ใน CF account)"
+log " ⚠️  Domain ผิด   : $MISMATCHED เว็บ  (domain ใน plugin ไม่ตรงกับ folder)"
+log " ⏭  Skip          : $SKIPPED เว็บ  (plugin ปิด / ไม่มี key)"
+log " เวลาที่ใช้       : $(( ELAPSED / 60 )) นาที $(( ELAPSED % 60 )) วินาที"
 log "======================================"
-log " Log รวม      : $LOG_FILE"
-log " ✅ Pass       : $LOG_PASS"
-log " ❌ Fail       : $LOG_FAIL"
-log " ⏭  Skip       : $LOG_SKIP"
+log " Log รวม         : $LOG_FILE"
+log " ✅ Pass          : $LOG_PASS"
+log " ✔️  Has Zone       : $LOG_HASZONE"
+log " ❌ Fail          : $LOG_FAIL"
+log " 🌐 Not in CF     : $LOG_NOTCF"
+log " ⚠️  Domain ผิด   : $LOG_MISMATCH"
+log " ⏭  Skip          : $LOG_SKIP"
 log "======================================"
 
-if (( FAILED > 0 )); then
-    echo ""
-    echo "━━━ รายการ FAIL ━━━"
-    cat "$LOG_FAIL"
-fi
+# ดูรายละเอียดแต่ละ category ได้จาก log files ด้านบน
 
 exit 0
