@@ -165,17 +165,19 @@ process_site() {
         }
 
         // ── 3. ตรวจ domain ใน plugin ตรงกับ folder ไหม ────────
-        // เช่น folder=101tiger.org แต่ name=ambauto900.com → ผิด
+        // เช่น folder=101tiger.org name=ambauto900.com → แก้อัตโนมัติ
         $folder = basename(rtrim(ABSPATH, "/"));
-        // กรณี public_html → ใช้ชื่อ domain จาก folder parent
         if ($folder === "public_html") {
             $folder = basename(dirname(rtrim(ABSPATH, "/")));
         }
         $name_clean = preg_replace("#^https?://#", "", rtrim($name, "/"));
+        $was_fixed  = false;
         if ($folder && $name_clean && $folder !== $name_clean) {
-            printf("STATUS:MISMATCH\tFOLDER:%s\tDOMAIN:%s\tEMAIL:%s\tKEY:%s",
-                $folder, $name_clean, $email, substr($key,0,8));
-            return;
+            // แก้ domain ให้ตรงกับ folder → update DB
+            update_option("litespeed.conf.cdn-cloudflare_name",  $folder);
+            update_option("litespeed.conf.cdn-cloudflare_zone",  "");
+            $name      = $folder;
+            $was_fixed = true;
         }
 
         // ── 4. มี zone อยู่แล้ว → skip ไม่ต้องยิง CF API ──────
@@ -238,8 +240,8 @@ process_site() {
 
         // ── 5. Verify ─────────────────────────────────────────
         $verify = trim((string) get_option("litespeed.conf.cdn-cloudflare_zone", ""));
-        printf("STATUS:DONE\tZONE:%s\tDOMAIN:%s\tEMAIL:%s\tKEY:%s\tATTEMPT:%d\tERROR:%s",
-            $verify, $zone_name ?: $name, $email, substr($key,0,8), $attempt, $cf_error
+        printf("STATUS:DONE\tZONE:%s\tDOMAIN:%s\tEMAIL:%s\tKEY:%s\tATTEMPT:%d\tERROR:%s\tFIXED:%d",
+            $verify, $zone_name ?: $name, $email, substr($key,0,8), $attempt, $cf_error, $was_fixed ? 1 : 0
         );
     ' --allow-root 2>/dev/null)
 
@@ -247,16 +249,6 @@ process_site() {
     STATUS=$(echo "$EVAL_OUT" | grep -oP '(?<=STATUS:)\w+')
 
     case "$STATUS" in
-        MISMATCH)
-            local MF MD ME MK
-            MF=$(echo "$EVAL_OUT" | grep -oP '(?<=FOLDER:)[^\t]*')
-            MD=$(echo "$EVAL_OUT" | grep -oP '(?<=DOMAIN:)[^\t]*')
-            ME=$(echo "$EVAL_OUT" | grep -oP '(?<=EMAIL:)[^\t]*')
-            MK=$(echo "$EVAL_OUT" | grep -oP '(?<=KEY:)[^\t]*')
-            _log  "⚠️  MISMATCH: $LABEL | folder=$MF แต่ domain=$MD"
-            _log_r mismatch "$SITE | folder=$MF | domain=$MD | email=$ME | key=${MK}..."
-            touch "${RESULT_DIR}/mismatch_${UNIQ}"
-            ;;
         HAS_ZONE)
             local HZ HD
             HZ=$(echo "$EVAL_OUT" | grep -oP '(?<=ZONE:)[^\t]*')
@@ -292,17 +284,22 @@ process_site() {
             ATTEMPT=$( echo "$EVAL_OUT" | grep -oP '(?<=ATTEMPT:)\d+')
             CFERROR=$( echo "$EVAL_OUT" | grep -oP '(?<=ERROR:)[^\t]*')
 
+            local FIXED
+            FIXED=$(echo "$EVAL_OUT" | grep -oP '(?<=FIXED:)\d+')
+            local FIX_TAG=""
+            [[ "$FIXED" == "1" ]] && FIX_TAG=" | ⚙️ domain ถูกแก้อัตโนมัติ"
+
             if [[ -n "$ZONE" ]]; then
-                _log  "✅ PASS: $LABEL | domain=$DOMAIN | zone=$ZONE | attempt=${ATTEMPT}/${MAX_RETRY}"
-                _log_r pass "$SITE | domain=$DOMAIN | zone=$ZONE | email=$EMAIL | key=${KPFX}... | attempt=${ATTEMPT}/${MAX_RETRY}"
+                _log  "✅ PASS: $LABEL | domain=$DOMAIN | zone=$ZONE | attempt=${ATTEMPT}/${MAX_RETRY}${FIX_TAG}"
+                _log_r pass "$SITE | domain=$DOMAIN | zone=$ZONE | email=$EMAIL | key=${KPFX}... | attempt=${ATTEMPT}/${MAX_RETRY}${FIX_TAG}"
                 touch "${RESULT_DIR}/pass_${UNIQ}"
             elif [[ "$CFERROR" == "zone_empty" ]]; then
-                _log  "🌐 NOTCF: $LABEL | domain=$DOMAIN | domain ไม่อยู่ใน CF account"
-                _log_r notcf "$SITE | domain=$DOMAIN | email=$EMAIL | key=${KPFX}... | domain ไม่อยู่ใน CF account"
+                _log  "🌐 NOTCF: $LABEL | domain=$DOMAIN | domain ไม่อยู่ใน CF account${FIX_TAG}"
+                _log_r notcf "$SITE | domain=$DOMAIN | email=$EMAIL | key=${KPFX}...${FIX_TAG}"
                 touch "${RESULT_DIR}/notcf_${UNIQ}"
             else
-                _log  "❌ FAIL: $LABEL | domain=$DOMAIN | attempt=${ATTEMPT}/${MAX_RETRY} | error=$CFERROR"
-                _log_r fail "$SITE | zone=(empty) | domain=$DOMAIN | email=$EMAIL | key=${KPFX}... | attempt=${ATTEMPT}/${MAX_RETRY} | error=$CFERROR"
+                _log  "❌ FAIL: $LABEL | domain=$DOMAIN | attempt=${ATTEMPT}/${MAX_RETRY} | error=$CFERROR${FIX_TAG}"
+                _log_r fail "$SITE | zone=(empty) | domain=$DOMAIN | email=$EMAIL | key=${KPFX}... | attempt=${ATTEMPT}/${MAX_RETRY} | error=$CFERROR${FIX_TAG}"
                 touch "${RESULT_DIR}/fail_${UNIQ}"
             fi
             ;;
@@ -337,7 +334,7 @@ ELAPSED=$(( END_TIME - START_TIME ))
 SUCCESS=$(   find "$RESULT_DIR" -name "pass_*"     2>/dev/null | wc -l)
 FAILED=$(    find "$RESULT_DIR" -name "fail_*"     2>/dev/null | wc -l)
 SKIPPED=$(   find "$RESULT_DIR" -name "skip_*"     2>/dev/null | wc -l)
-MISMATCHED=$(find "$RESULT_DIR" -name "mismatch_*" 2>/dev/null | wc -l)
+FIXED_COUNT=$(grep -c "domain ถูกแก้อัตโนมัติ" "$LOG_PASS" "$LOG_NOTCF" "$LOG_FAIL" 2>/dev/null | awk -F: '{sum+=$2} END{print sum+0}')
 NOTCF=$(     find "$RESULT_DIR" -name "notcf_*"    2>/dev/null | wc -l)
 HASZONE=$(   find "$RESULT_DIR" -name "haszone_*"  2>/dev/null | wc -l)
 CFOFF=$(     find "$RESULT_DIR" -name "cfoff_*"     2>/dev/null | wc -l)
@@ -349,7 +346,7 @@ log " ✅ Pass          : $SUCCESS เว็บ"
 log " ✔️  Has Zone       : $HASZONE เว็บ  (มี zone อยู่แล้ว ข้ามไป)"
 log " ❌ Fail          : $FAILED เว็บ  (CF API error/timeout)"
 log " 🌐 Not in CF     : $NOTCF เว็บ  (domain ไม่อยู่ใน CF account)"
-log " ⚠️  Domain ผิด   : $MISMATCHED เว็บ  (domain ใน plugin ไม่ตรงกับ folder)"
+log " ⚙️  Auto-fixed    : $FIXED_COUNT เว็บ  (domain ถูกแก้อัตโนมัติจาก folder name)"
 log " 🔴 CF Off         : $CFOFF เว็บ  (Cloudflare ปิดอยู่ใน plugin)"
 log " ⏭  Skip          : $SKIPPED เว็บ  (เว็บใหม่ยังไม่ได้ขึ้น / ไม่มี key)"
 log " เวลาที่ใช้       : $(( ELAPSED / 60 )) นาที $(( ELAPSED % 60 )) วินาที"
@@ -359,7 +356,7 @@ log " ✅ Pass          : $LOG_PASS"
 log " ✔️  Has Zone       : $LOG_HASZONE"
 log " ❌ Fail          : $LOG_FAIL"
 log " 🌐 Not in CF     : $LOG_NOTCF"
-log " ⚠️  Domain ผิด   : $LOG_MISMATCH"
+log " ⚙️  Auto-fixed    : ดูใน pass/notcf/fail log (tag: domain ถูกแก้อัตโนมัติ)"
 log " 🔴 CF Off         : $LOG_CFOFF"
 log " ⏭  Skip          : $LOG_SKIP"
 log "======================================"
