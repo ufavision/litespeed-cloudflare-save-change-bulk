@@ -1,6 +1,6 @@
-# litespeed-cloudflare-save-change-bulk.sh
+# litespeed-cloudflare-zone-save-change-bulk.sh
 
-> Bulk **"Save Changes"** — LiteSpeed Cache › CDN › Tab Cloudflare › Cloudflare Setting  
+> Bulk **"Zone Save Changes"** — LiteSpeed Cache › CDN › Tab Cloudflare › Cloudflare Setting  
 > รันครั้งเดียว ครอบคลุมทุกเว็บใน cPanel/WHM server
 
 ---
