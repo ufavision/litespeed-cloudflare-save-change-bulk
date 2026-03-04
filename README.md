@@ -8,13 +8,13 @@
 ## วิธีรัน
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/ufavision/server-scripts/main/litespeed-cloudflare-save-change-bulk.sh)
+bash <(curl -s https://raw.githubusercontent.com/ufavision/litespeed-cloudflare-save-change-bulk/main/litespeed-cloudflare-save-change-bulk.sh)
 ```
 
 หรือดาวน์โหลดก่อน:
 
 ```bash
-curl -O https://raw.githubusercontent.com/ufavision/server-scripts/main/litespeed-cloudflare-save-change-bulk.sh
+curl -O https://raw.githubusercontent.com/ufavision/litespeed-cloudflare-save-change-bulk/main/litespeed-cloudflare-save-change-bulk.sh
 chmod +x litespeed-cloudflare-save-change-bulk.sh
 bash litespeed-cloudflare-save-change-bulk.sh
 ```
